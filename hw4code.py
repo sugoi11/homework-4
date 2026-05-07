@@ -103,7 +103,7 @@ class DecisionTree:
             ft not in ["real", "categorical"]
             for ft in feature_types
         ]):
-            raise ValueError("Unknown feature type")
+            raise ValueError("There is unknown feature type")
 
         self._tree = {}
         self._feature_types = feature_types
