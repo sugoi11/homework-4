@@ -4,66 +4,77 @@ from collections import Counter
 
 def find_best_split(feature_vector, target_vector):
     """
-    Finds the best split using the Gini criterion.
+    Finds the best split using Gini impurity.
+
+    Returns:
+    thresholds      - all valid thresholds
+    ginis           - gini gains for each threshold
+    threshold_best  - best threshold
+    gini_best       - best gini gain
     """
 
-    # Sort feature values and targets
-    sorted_idx = np.argsort(feature_vector)
-    feature_vector = feature_vector[sorted_idx]
-    target_vector = target_vector[sorted_idx]
+    feature_vector = np.asarray(feature_vector)
+    target_vector = np.asarray(target_vector)
 
-    # Possible thresholds: average of neighboring feature values
-    thresholds = (feature_vector[:-1] + feature_vector[1:]) / 2
+    # sort by feature
+    order = np.argsort(feature_vector)
+    feature_sorted = feature_vector[order]
+    target_sorted = target_vector[order]
 
-    # Remove duplicate thresholds
-    valid = feature_vector[:-1] != feature_vector[1:]
-    thresholds = thresholds[valid]
+    # valid split positions
+    diff = feature_sorted[1:] != feature_sorted[:-1]
+    valid_idx = np.where(diff)[0]
 
-    if len(thresholds) == 0:
+    if len(valid_idx) == 0:
         return np.array([]), np.array([]), None, None
 
-    n = len(target_vector)
+    # thresholds = averages of neighbors
+    thresholds = (
+        feature_sorted[valid_idx] +
+        feature_sorted[valid_idx + 1]
+    ) / 2
+
     classes = np.unique(target_vector)
     n_classes = len(classes)
+    n = len(target_vector)
 
-    ginis = []
+    # one-hot encoding
+    y_encoded = np.zeros((n, n_classes))
 
-    for threshold in thresholds:
+    for i, cls in enumerate(classes):
+        y_encoded[:, i] = (target_sorted == cls)
 
-        left_mask = feature_vector < threshold
-        right_mask = ~left_mask
+    # cumulative class counts
+    left_counts = np.cumsum(y_encoded, axis=0)
+    total_counts = left_counts[-1]
 
-        y_left = target_vector[left_mask]
-        y_right = target_vector[right_mask]
+    left_n = np.arange(1, n)
+    right_n = n - left_n
 
-        if len(y_left) == 0 or len(y_right) == 0:
-            continue
+    left_counts = left_counts[:-1]
+    right_counts = total_counts - left_counts
 
-        # Left Gini
-        left_probs = np.array([
-            np.sum(y_left == c) / len(y_left)
-            for c in classes
-        ])
-        gini_left = 1 - np.sum(left_probs ** 2)
+    # only valid splits
+    left_counts = left_counts[valid_idx]
+    right_counts = right_counts[valid_idx]
 
-        # Right Gini
-        right_probs = np.array([
-            np.sum(y_right == c) / len(y_right)
-            for c in classes
-        ])
-        gini_right = 1 - np.sum(right_probs ** 2)
+    left_n = left_n[valid_idx]
+    right_n = right_n[valid_idx]
 
-        # Weighted Gini gain
-        gini = -(
-            (len(y_left) / n) * gini_left +
-            (len(y_right) / n) * gini_right
-        )
+    # probabilities
+    left_p = left_counts / left_n[:, None]
+    right_p = right_counts / right_n[:, None]
 
-        ginis.append(gini)
+    # gini impurities
+    gini_left = 1 - np.sum(left_p ** 2, axis=1)
+    gini_right = 1 - np.sum(right_p ** 2, axis=1)
 
-    ginis = np.array(ginis)
+    # weighted impurity
+    ginis = -(
+        left_n / n * gini_left +
+        right_n / n * gini_right
+    )
 
-    # Best split
     best_idx = np.argmax(ginis)
 
     threshold_best = thresholds[best_idx]
@@ -74,18 +85,25 @@ def find_best_split(feature_vector, target_vector):
 
 class DecisionTree:
     """
-    Simple Decision Tree Classifier
+    Simple Decision Tree classifier.
+    Supports:
+    - real and categorical features
+    - binary and multiclass classification
     """
 
-    def __init__(self, feature_types,
-                 max_depth=None,
-                 min_samples_split=None,
-                 min_samples_leaf=None):
+    def __init__(
+        self,
+        feature_types,
+        max_depth=None,
+        min_samples_split=2,
+        min_samples_leaf=1
+    ):
 
-        if np.any(list(map(lambda x:
-                           x != "real" and x != "categorical",
-                           feature_types))):
-            raise ValueError("There is unknown feature type")
+        if np.any([
+            ft not in ["real", "categorical"]
+            for ft in feature_types
+        ]):
+            raise ValueError("Unknown feature type")
 
         self._tree = {}
         self._feature_types = feature_types
@@ -95,22 +113,23 @@ class DecisionTree:
 
     def _fit_node(self, sub_X, sub_y, node, depth=0):
 
-        # Stop conditions
-        if len(np.unique(sub_y)) == 1:
+        # stop if all labels equal
+        if np.all(sub_y == sub_y[0]):
             node["type"] = "terminal"
             node["class"] = sub_y[0]
             return
 
+        # max depth
         if self._max_depth is not None and depth >= self._max_depth:
             node["type"] = "terminal"
             node["class"] = Counter(sub_y).most_common(1)[0][0]
             return
 
-        if self._min_samples_split is not None:
-            if len(sub_y) < self._min_samples_split:
-                node["type"] = "terminal"
-                node["class"] = Counter(sub_y).most_common(1)[0][0]
-                return
+        # min samples split
+        if len(sub_y) < self._min_samples_split:
+            node["type"] = "terminal"
+            node["class"] = Counter(sub_y).most_common(1)[0][0]
+            return
 
         feature_best = None
         threshold_best = None
@@ -121,22 +140,32 @@ class DecisionTree:
 
             feature_type = self._feature_types[feature]
 
-            # REAL FEATURES
+            # REAL FEATURE
             if feature_type == "real":
+                feature_vector = sub_X[:, feature]
 
-                feature_vector = sub_X[:, feature].astype(float)
-
-            # CATEGORICAL FEATURES
+            # CATEGORICAL FEATURE
             elif feature_type == "categorical":
 
                 counts = Counter(sub_X[:, feature])
 
+                # multiclass-safe ordering
                 ratios = {}
 
                 for category in counts:
-                    ratios[category] = counts[category]
+                    mask = sub_X[:, feature] == category
 
-                sorted_categories = sorted(ratios.keys())
+                    # dominant class frequency
+                    cls_counts = Counter(sub_y[mask])
+
+                    dominant_ratio = max(cls_counts.values()) / counts[category]
+
+                    ratios[category] = dominant_ratio
+
+                sorted_categories = sorted(
+                    ratios,
+                    key=ratios.get
+                )
 
                 categories_map = {
                     cat: i
@@ -151,11 +180,10 @@ class DecisionTree:
             else:
                 raise ValueError
 
-            # Skip constant feature
-            if len(np.unique(feature_vector)) == 1:
+            if len(np.unique(feature_vector)) < 2:
                 continue
 
-            _, _, threshold, gini = find_best_split(
+            thresholds, ginis, threshold, gini = find_best_split(
                 feature_vector,
                 sub_y
             )
@@ -163,27 +191,37 @@ class DecisionTree:
             if threshold is None:
                 continue
 
-            if gini_best is None or gini > gini_best:
+            split = feature_vector < threshold
+
+            # min samples leaf
+            if (
+                split.sum() < self._min_samples_leaf or
+                (~split).sum() < self._min_samples_leaf
+            ):
+                continue
+
+            if (
+                gini_best is None or
+                gini > gini_best or
+                (
+                    np.isclose(gini, gini_best) and
+                    threshold < threshold_best
+                )
+            ):
 
                 feature_best = feature
+                threshold_best = threshold
                 gini_best = gini
-
-                split = feature_vector < threshold
                 split_best = split
 
-                if feature_type == "real":
-                    threshold_best = threshold
-
-                elif feature_type == "categorical":
-
-                    threshold_best = [
-                        category
-                        for category, value
-                        in categories_map.items()
+                if feature_type == "categorical":
+                    categories_split = [
+                        cat
+                        for cat, value in categories_map.items()
                         if value < threshold
                     ]
 
-        # No split found
+        # no valid split
         if feature_best is None:
             node["type"] = "terminal"
             node["class"] = Counter(sub_y).most_common(1)[0][0]
@@ -194,9 +232,8 @@ class DecisionTree:
 
         if self._feature_types[feature_best] == "real":
             node["threshold"] = threshold_best
-
         else:
-            node["categories_split"] = threshold_best
+            node["categories_split"] = categories_split
 
         node["left_child"] = {}
         node["right_child"] = {}
@@ -217,13 +254,11 @@ class DecisionTree:
 
     def _predict_node(self, x, node):
 
-        # Terminal node
         if node["type"] == "terminal":
             return node["class"]
 
         feature = node["feature_split"]
 
-        # Real feature
         if self._feature_types[feature] == "real":
 
             if x[feature] < node["threshold"]:
@@ -237,7 +272,6 @@ class DecisionTree:
                     node["right_child"]
                 )
 
-        # Categorical feature
         else:
 
             if x[feature] in node["categories_split"]:
@@ -256,11 +290,9 @@ class DecisionTree:
 
     def predict(self, X):
 
-        predicted = []
+        predictions = [
+            self._predict_node(x, self._tree)
+            for x in X
+        ]
 
-        for x in X:
-            predicted.append(
-                self._predict_node(x, self._tree)
-            )
-
-        return np.array(predicted)
+        return np.array(predictions)
